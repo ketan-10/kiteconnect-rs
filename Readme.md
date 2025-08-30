@@ -51,9 +51,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Generate user session
     let session = kite.generate_session(&request_token, &api_secret).await?;
-    
-    // Set access token
-    kite.set_access_token(&session.access_token);
 
     // Get user margins
     let margins = kite.get_user_margins().await?;
@@ -62,13 +59,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Place an order
     let order_params = OrderParams {
         exchange: Some("NSE".to_string()),
-        tradingsymbol: Some("RELIANCE".to_string()),
+        tradingsymbol: Some("IDEA".to_string()),
         transaction_type: Some("BUY".to_string()),
-        order_type: Some("MARKET".to_string()),
+        order_type: Some("LIMIT".to_string()),
         quantity: Some(1),
+        price: Some(6.52),
         product: Some("CNC".to_string()),
         validity: Some("DAY".to_string()),
-        ..Default::default()
+        disclosed_quantity: None,
+        trigger_price: None,
+        squareoff: None,
+        stoploss: None,
+        trailing_stoploss: None,
+        iceberg_legs: None,
+        iceberg_quantity: None,
+        auction_number: None,
+        tag: Some("example-order".to_string()),
+        validity_ttl: None,
     };
 
     let order_response = kite.place_order(order_params).await?;
@@ -82,66 +89,106 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```rust
 use std::time::Duration;
+
 use kiteconnect_rs::ticker::{Mode, Ticker, TickerEvent};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create ticker instance
-    let (ticker, handle) = Ticker::builder("your_api_key", "your_access_token")
+    // Create ticker and get handle
+    let (ticker, handle) = Ticker::builder("<api_key>", "<access_token>")
         .auto_reconnect(true)
         .reconnect_max_retries(10)
         .connect_timeout(Duration::from_secs(10))
         .build()?;
 
-    // Subscribe to events
+    // Subscribe to events before starting
     let mut event_receiver = handle.subscribe_events();
-    let event_handle = handle.clone();
 
-    // Start WebSocket connection
+    // Clone handle for event handler task
+    let event_handle_clone = handle.clone();
+
+    // Start the WebSocket server in a background task
     let serve_task = tokio::spawn(async move {
         if let Err(e) = ticker.serve().await {
-            eprintln!("Ticker error: {}", e);
+            eprintln!("Ticker serve error: {}", e);
         }
     });
 
-    // Handle events
+    // Handle events and manage subscriptions
     let event_task = tokio::spawn(async move {
         while let Ok(event) = event_receiver.recv().await {
             match event {
                 TickerEvent::Connect => {
-                    println!("Connected!");
-                    
-                    // Subscribe to instruments
-                    let tokens = vec![256265, 738561]; // NIFTY 50, RELIANCE
-                    event_handle.subscribe(tokens.clone()).await?;
-                    
-                    // Set to full mode for detailed data
-                    event_handle.set_mode(Mode::Full, tokens).await?;
+                    println!("Connected! Subscribing to instruments...");
+
+                    // Now we can subscribe using the handle without blocking
+                    let tokens = vec![256265, 738561]; // NIFTY 50 and RELIANCE
+
+                    if let Err(e) = event_handle_clone.subscribe(tokens.clone()).await {
+                        eprintln!("Subscribe error: {}", e);
+                    } else {
+                        println!("Subscribed to tokens: {:?}", tokens);
+                    }
+
+                    // Set mode to Full for detailed data
+                    if let Err(e) = event_handle_clone
+                        .set_mode(Mode::Full, tokens.clone())
+                        .await
+                    {
+                        eprintln!("Set mode error: {}", e);
+                    }
+
+                    // Later, we can add more subscriptions dynamically
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+                    let more_tokens = vec![341249]; // HDFC Bank
+                    if let Err(e) = event_handle_clone.subscribe(more_tokens.clone()).await {
+                        eprintln!("Subscribe error: {}", e);
+                    } else {
+                        println!("Added more subscriptions: {:?}", more_tokens);
+                    }
                 }
                 TickerEvent::Tick(tick) => {
-                    println!("Tick received: {:#?}", tick);
+                    println!(
+                        "Tick: {} - Price: {:.2}, Volume: {}",
+                        tick.instrument_token, tick.last_price, tick.volume_traded
+                    );
+                    // println!(" Tick: {:#?}", tick);
                 }
-                TickerEvent::OrderUpdate(order) => {
-                    println!("Order update: {:#?}", order);
-                }
-                TickerEvent::Error(error) => {
-                    eprintln!("Ticker error: {}", error);
+                TickerEvent::Error(e) => {
+                    eprintln!("Error: {}", e);
                 }
                 TickerEvent::Close(code, reason) => {
                     println!("Connection closed: {} - {}", code, reason);
+                    break;
                 }
-                TickerEvent::Reconnect(attempt) => {
-                    println!("Reconnecting... attempt {}", attempt);
+                TickerEvent::Reconnect(attempt, delay) => {
+                    println!("Reconnecting (attempt {}), waiting {:?}...", attempt, delay);
                 }
+                _ => {}
             }
         }
-        Ok::<(), Box<dyn std::error::Error>>(())
     });
 
-    // Wait for tasks
+    // You can also use the handle from the main thread
+    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+
+    // Example: Unsubscribe from a token
+    println!("Unsubscribing from token 341249...");
+    if let Err(e) = handle.unsubscribe(vec![341249]).await {
+        eprintln!("Unsubscribe error: {}", e);
+    }
+
+    // Example: Change mode for remaining tokens
+    println!("Changing mode to Quote for remaining tokens...");
+    if let Err(e) = handle.set_mode(Mode::Quote, vec![256265, 738561]).await {
+        eprintln!("Set mode error: {}", e);
+    }
+
+    // Wait for tasks to complete
     tokio::select! {
-        _ = serve_task => {},
-        _ = event_task => {},
+        _ = serve_task => println!("Serve task completed"),
+        _ = event_task => println!("Event handler completed"),
     }
 
     Ok(())
