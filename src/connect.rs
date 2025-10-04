@@ -16,10 +16,11 @@ impl KiteConnect {
 
     pub fn get_login_url(&self) -> String {
         format!(
-            "{}{} ?api_key={}&v=3",
+            "{}{} ?api_key={}&v={}",
             KITE_BASE_URL,
             Endpoints::LOGIN_URL,
-            self.api_key
+            self.api_key,
+            KITE_HEADER_VERSION
         )
     }
 
@@ -29,16 +30,6 @@ impl KiteConnect {
 
     pub fn clear_access_token(&mut self) {
         self.access_token = None;
-    }
-
-    pub fn get_url(&self) -> String {
-        format!(
-            "{}{}?v={}&api_key={}",
-            KITE_BASE_URL,
-            Endpoints::LOGIN_URL,
-            KITE_HEADER_VERSION,
-            self.api_key
-        )
     }
 
     /// Get the current access token (for testing purposes)

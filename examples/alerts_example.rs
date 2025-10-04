@@ -8,7 +8,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = "<api_key>";
     let mut kite = KiteConnect::builder(&api_key).build()?;
 
-    println!("Login URL: {}", kite.get_url());
+    println!("Login URL: {}", kite.get_login_url());
     println!("Press Enter request token after login...");
     let mut request_token = String::new();
     std::io::stdin().read_line(&mut request_token)?;
