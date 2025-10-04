@@ -17,12 +17,8 @@ use crate::{
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ApiResponse<T> {
-    status: String,
-    data: T,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DataOnlyResponse<T> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
     data: T,
 }
 
@@ -100,10 +96,6 @@ impl KiteConnect {
             // Try to parse as wrapped response first
             if let Ok(api_response) = serde_json::from_str::<ApiResponse<T>>(&response_text) {
                 Ok(api_response.data)
-            } else if let Ok(data_response) =
-                serde_json::from_str::<DataOnlyResponse<T>>(&response_text)
-            {
-                Ok(data_response.data)
             } else if let Ok(result) = serde_json::from_str::<T>(&response_text) {
                 Ok(result)
             } else if let Ok(result) =
