@@ -1,14 +1,15 @@
 use crate::models::time::Time;
-use crate::models::{DepthItem, OHLC, Order, Tick};
+use crate::models::{DepthItem, Order, Tick, OHLC};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::future::pending;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::time::sleep;
-use tokio_tungstenite::{WebSocketStream, connect_async, tungstenite::Message};
+use tokio_tungstenite::{connect_async, tungstenite::Message, WebSocketStream};
 use url::Url;
 
 // Mode represents available ticker modes.
@@ -542,21 +543,35 @@ impl Ticker {
             })
         };
 
-        // Wait for any critical task to complete or fail
+        // wait for any one to finish and kill all when anyone does return.
+        let mut msg = message_handler;
+        let mut rec = reconnect_handler;
+        let mut cmd = command_handler;
+        // used mut ref as we don't want to own it, so it will be used below to abort
+
         tokio::select! {
-            _ = message_handler => {},
+            _ = &mut msg => {},
             _ = async {
-                if let Some(handler) = reconnect_handler {
-                    handler.await.ok();
+                match rec.as_mut() {
+                    Some(h) => { h.await.ok(); },
+                    None => pending().await, // Never completes
                 }
             } => {},
             _ = async {
-                if let Some(handler) = command_handler {
-                    handler.await.ok();
+                match cmd.as_mut() {
+                    Some(h) => { h.await.ok(); },
+                    None => pending().await, // Never completes
                 }
             } => {},
         }
 
+        msg.abort();
+        if let Some(h) = rec {
+            h.abort();
+        }
+        if let Some(h) = cmd {
+            h.abort();
+        }
         Ok(())
     }
 
