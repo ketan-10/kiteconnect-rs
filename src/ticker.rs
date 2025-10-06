@@ -268,6 +268,22 @@ impl Ticker {
     pub async fn serve(mut self) -> Result<(), TickerError> {
         let mut reconnect_attempt = 0;
 
+        // Create a channel for forwarding WS commands from persistent command handler to active connection
+        let (ws_cmd_tx, ws_cmd_rx) = mpsc::unbounded_channel::<TickerCommand>();
+        let ws_cmd_rx = Arc::new(RwLock::new(ws_cmd_rx));
+
+        // Spawn persistent command handler that runs across all reconnections
+        let _command_forwarder = if let Some(mut command_rx) = self.command_receiver.take() {
+            let ws_tx = ws_cmd_tx.clone();
+            Some(tokio::spawn(async move {
+                while let Some(command) = command_rx.recv().await {
+                    let _ = ws_tx.send(command);
+                }
+            }))
+        } else {
+            None
+        };
+
         loop {
             // If reconnect attempt exceeds max then close the loop
             if reconnect_attempt > self.reconnect_max_retries {
@@ -325,7 +341,7 @@ impl Ticker {
                     }
 
                     // Handle the WebSocket connection
-                    if let Err(e) = self.handle_connection(ws_stream).await {
+                    if let Err(e) = self.handle_connection(ws_stream, ws_cmd_rx.clone()).await {
                         let error_msg = e.message.clone();
                         let _ = self
                             .event_sender
@@ -366,6 +382,7 @@ impl Ticker {
     async fn handle_connection(
         &mut self,
         ws_stream: WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        ws_cmd_rx: Arc<RwLock<mpsc::UnboundedReceiver<TickerCommand>>>,
     ) -> Result<(), TickerError> {
         // Run watcher to check last ping time and reconnect if required
         let reconnect_handler = if self.auto_reconnect {
@@ -399,15 +416,24 @@ impl Ticker {
         // Channel for sending messages to WebSocket
         let sender = self.event_sender.clone();
 
-        // Task to handle command processing
-        let command_handler = if let Some(command_rx) = self.command_receiver.take() {
-            let subscribed_tokens = self.subscribed_tokens.clone();
+        // Create a channel for this connection to receive WebSocket write commands
+        let (ws_write_tx, mut ws_write_rx) = mpsc::unbounded_channel::<Message>();
 
-            Some(tokio::spawn(async move {
-                let mut command_rx = command_rx;
-                while let Some(command) = command_rx.recv().await {
+        // Task to handle command processing for this connection
+        let command_handler = {
+            let subscribed_tokens = self.subscribed_tokens.clone();
+            let ws_tx = ws_write_tx.clone();
+
+            tokio::spawn(async move {
+                loop {
+                    let command = {
+                        let mut rx = ws_cmd_rx.write().await;
+                        rx.recv().await
+                    };
+
                     match command {
-                        TickerCommand::Subscribe(tokens) => {
+                        None => break,
+                        Some(TickerCommand::Subscribe(tokens)) => {
                             // Store tokens
                             {
                                 let mut subscribed = subscribed_tokens.write().await;
@@ -422,15 +448,10 @@ impl Ticker {
                             };
 
                             if let Ok(message) = serde_json::to_string(&input) {
-                                if let Err(e) = write.send(Message::Text(message.into())).await {
-                                    let _ = sender.send(TickerEvent::Error(format!(
-                                        "Failed to send WebSocket message: {}",
-                                        e
-                                    )));
-                                }
+                                let _ = ws_tx.send(Message::Text(message.into()));
                             }
                         }
-                        TickerCommand::Unsubscribe(tokens) => {
+                        Some(TickerCommand::Unsubscribe(tokens)) => {
                             // Remove tokens
                             {
                                 let mut subscribed = subscribed_tokens.write().await;
@@ -445,15 +466,10 @@ impl Ticker {
                             };
 
                             if let Ok(message) = serde_json::to_string(&input) {
-                                if let Err(e) = write.send(Message::Text(message.into())).await {
-                                    let _ = sender.send(TickerEvent::Error(format!(
-                                        "Failed to send WebSocket message: {}",
-                                        e
-                                    )));
-                                }
+                                let _ = ws_tx.send(Message::Text(message.into()));
                             }
                         }
-                        TickerCommand::SetMode(mode, tokens) => {
+                        Some(TickerCommand::SetMode(mode, tokens)) => {
                             // Update mode
                             {
                                 let mut subscribed = subscribed_tokens.write().await;
@@ -468,19 +484,28 @@ impl Ticker {
                             };
 
                             if let Ok(message) = serde_json::to_string(&input) {
-                                if let Err(e) = write.send(Message::Text(message.into())).await {
-                                    let _ = sender.send(TickerEvent::Error(format!(
-                                        "Failed to send WebSocket message: {}",
-                                        e
-                                    )));
-                                }
+                                let _ = ws_tx.send(Message::Text(message.into()));
                             }
                         }
                     }
                 }
-            }))
-        } else {
-            None
+            })
+        };
+
+        // WebSocket writer task - receives messages from command handler and sends to WS
+        let ws_writer = {
+            let error_sender = sender.clone();
+            tokio::spawn(async move {
+                while let Some(message) = ws_write_rx.recv().await {
+                    if let Err(e) = write.send(message).await {
+                        let _ = error_sender.send(TickerEvent::Error(format!(
+                            "Failed to send WebSocket message: {}",
+                            e
+                        )));
+                        break;
+                    }
+                }
+            })
         };
 
         // Handle incoming messages
@@ -545,33 +570,29 @@ impl Ticker {
 
         // wait for any one to finish and kill all when anyone does return.
         let mut msg = message_handler;
+        let mut writer = ws_writer;
         let mut rec = reconnect_handler;
         let mut cmd = command_handler;
         // used mut ref as we don't want to own it, so it will be used below to abort
 
         tokio::select! {
             _ = &mut msg => {},
+            _ = &mut writer => {},
             _ = async {
                 match rec.as_mut() {
                     Some(h) => { h.await.ok(); },
                     None => pending().await, // Never completes
                 }
             } => {},
-            _ = async {
-                match cmd.as_mut() {
-                    Some(h) => { h.await.ok(); },
-                    None => pending().await, // Never completes
-                }
-            } => {},
+            _ = &mut cmd => {},
         }
 
         msg.abort();
+        writer.abort();
         if let Some(h) = rec {
             h.abort();
         }
-        if let Some(h) = cmd {
-            h.abort();
-        }
+        cmd.abort();
         Ok(())
     }
 
