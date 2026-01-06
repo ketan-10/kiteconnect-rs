@@ -7,14 +7,54 @@
 
 use kiteconnect_rs::ticker::{Mode, Ticker, TickerEvent};
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::closure::Closure;
 use web_sys::console;
 use web_time::Duration;
 
 /// Initialize panic hook for better error messages in browser console
+/// Also exposes functions to window.wasm for the HTML to use
 #[wasm_bindgen(start)]
 pub fn init() {
     console_error_panic_hook::set_once();
     log("WASM module initialized");
+
+    // Expose functions to window.wasm for HTML to access
+    if let Some(window) = web_sys::window() {
+        let wasm_obj = js_sys::Object::new();
+
+        // Mark as ready
+        js_sys::Reflect::set(&wasm_obj, &JsValue::from_str("ready"), &JsValue::from(true)).ok();
+
+        // Set up function wrappers using closures
+        let start_ticker_fn = Closure::wrap(Box::new(|api_key: String, access_token: String, tokens: String| {
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Err(e) = start_ticker(api_key, access_token, tokens).await {
+                    log_error(&format!("start_ticker error: {:?}", e));
+                }
+            });
+        }) as Box<dyn Fn(String, String, String)>);
+
+        js_sys::Reflect::set(&wasm_obj, &JsValue::from_str("start_ticker"), start_ticker_fn.as_ref()).ok();
+        start_ticker_fn.forget(); // Don't drop the closure
+
+        let clear_output_fn = Closure::wrap(Box::new(|| {
+            clear_output();
+        }) as Box<dyn Fn()>);
+
+        js_sys::Reflect::set(&wasm_obj, &JsValue::from_str("clear_output"), clear_output_fn.as_ref()).ok();
+        clear_output_fn.forget();
+
+        let get_login_url_fn = Closure::wrap(Box::new(|api_key: String| -> String {
+            get_login_url(&api_key)
+        }) as Box<dyn Fn(String) -> String>);
+
+        js_sys::Reflect::set(&wasm_obj, &JsValue::from_str("get_login_url"), get_login_url_fn.as_ref()).ok();
+        get_login_url_fn.forget();
+
+        // Attach to window
+        js_sys::Reflect::set(&window, &JsValue::from_str("wasm"), &wasm_obj).ok();
+        log("window.wasm initialized");
+    }
 }
 
 /// Log a message to the browser console

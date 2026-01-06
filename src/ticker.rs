@@ -272,6 +272,9 @@ impl Ticker {
 
     pub async fn serve(mut self) -> Result<(), TickerError> {
         let mut reconnect_attempt = 0;
+        // Track whether we received valid data in the last connection
+        // This prevents infinite reconnects when auth fails (connection succeeds but closes immediately)
+        let received_data = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         loop {
             // If reconnect attempt exceeds max then close the loop
@@ -310,11 +313,11 @@ impl Ticker {
             let connection_future = compat::connect_ws(url.as_str());
             match compat::timeout(self.connect_timeout, connection_future).await {
                 Ok(Ok(ws_stream)) => {
-                    // Track if this is a reconnection before resetting counter
+                    // Track if this is a reconnection
                     let is_reconnect = reconnect_attempt > 0;
 
-                    // Reset reconnect attempt on successful connection
-                    reconnect_attempt = 0;
+                    // Reset the received_data flag for this connection attempt
+                    received_data.store(false, Ordering::SeqCst);
 
                     // Trigger connect event
                     let _ = self.event_sender.send(TickerEvent::Connect).await;
@@ -333,7 +336,8 @@ impl Ticker {
                     }
 
                     // Handle the WebSocket connection
-                    if let Err(e) = self.handle_connection(ws_stream).await {
+                    let received_data_clone = received_data.clone();
+                    if let Err(e) = self.handle_connection(ws_stream, received_data_clone).await {
                         let error_msg = e.message.clone();
                         let _ = self
                             .event_sender
@@ -343,6 +347,12 @@ impl Ticker {
                         if !self.auto_reconnect {
                             return Err(TickerError { message: error_msg });
                         }
+                    }
+
+                    // Only reset reconnect_attempt if we actually received valid data
+                    // This prevents infinite reconnects when auth fails
+                    if received_data.load(Ordering::SeqCst) {
+                        reconnect_attempt = 0;
                     }
                 }
                 Ok(Err(e)) => {
@@ -377,6 +387,7 @@ impl Ticker {
     async fn handle_connection(
         &mut self,
         mut ws_stream: Box<dyn compat::WebSocketStream>,
+        received_data: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<(), TickerError> {
         // Channel for outgoing WebSocket messages
         let (ws_tx, ws_rx) = async_channel::unbounded::<String>();
@@ -512,6 +523,8 @@ impl Ticker {
 
             match recv_result {
                 Ok(Some(Ok(WsMessage::Binary(data)))) => {
+                    // Mark that we received valid data (prevents infinite reconnect on auth failure)
+                    received_data.store(true, Ordering::SeqCst);
                     // Update last ping time
                     last_ping_time.set(SystemTime::now());
                     // Trigger message event
@@ -532,6 +545,8 @@ impl Ticker {
                     }
                 }
                 Ok(Some(Ok(WsMessage::Text(text)))) => {
+                    // Mark that we received valid data (prevents infinite reconnect on auth failure)
+                    received_data.store(true, Ordering::SeqCst);
                     // Update last ping time
                     last_ping_time.set(SystemTime::now());
 

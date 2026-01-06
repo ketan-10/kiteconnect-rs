@@ -187,8 +187,8 @@
             <input type="text" id="tokens" value="256265, 738561" placeholder="Comma-separated token list">
             <p class="hint">Example: 256265 (NIFTY 50), 738561 (RELIANCE), 341249 (HDFC Bank)</p>
         </div>
-        <button id="connectBtn" onclick="connect()">Connect</button>
-        <button class="secondary" onclick="wasm.clear_output()">Clear Log</button>
+        <button id="connectBtn" onclick="connect()" disabled>Connect</button>
+        <button class="secondary" onclick="window.wasm && window.wasm.clear_output()">Clear Log</button>
         <span id="status" class="status disconnected">Disconnected</span>
     </div>
 
@@ -201,37 +201,38 @@
         </div>
     </div>
 
-    <script type="module">
-        // Trunk automatically initializes WASM and exports to window.wasm_bindgen
-        // We also support manual wasm-pack builds via ./pkg/
-
-        let wasm = null;
-
-        // Initialize WASM - works with both trunk and wasm-pack
-        async function initWasm() {
-            try {
-                // Try trunk's auto-initialized module first
-                if (window.wasm_bindgen) {
-                    wasm = window.wasm_bindgen;
-                    console.log('WASM initialized via trunk');
-                } else {
-                    // Fall back to manual wasm-pack import
-                    const module = await import('./pkg/wasm_ticker_example.js');
-                    await module.default();
-                    wasm = module;
-                    console.log('WASM initialized via wasm-pack');
-                }
-                window.wasm = wasm;
-                document.getElementById('connectBtn').disabled = false;
-            } catch (e) {
-                console.error('Failed to initialize WASM:', e);
-                document.getElementById('output').innerHTML =
-                    '<div class="log-entry"><span class="error">Failed to load WASM module. Run: trunk serve (or wasm-pack build --target web)</span></div>';
+    <script>
+        // Wait for WASM to be initialized (set by Rust init function via #[wasm_bindgen(start)])
+        function waitForWasm() {
+            if (window.wasm && window.wasm.ready) {
+                onWasmReady();
+            } else {
+                setTimeout(waitForWasm, 50);
             }
         }
 
-        // Connect to ticker
-        window.connect = async function() {
+        function onWasmReady() {
+            console.log('WASM ready, enabling UI');
+            document.getElementById('connectBtn').disabled = false;
+            document.getElementById('output').innerHTML =
+                '<div class="log-entry"><span class="success">WASM loaded. Ready to connect.</span></div>';
+
+            // Update login link when API key changes
+            document.getElementById('apiKey').addEventListener('input', function(e) {
+                const apiKey = e.target.value.trim();
+                const loginLink = document.getElementById('loginLink');
+                if (apiKey && window.wasm && window.wasm.get_login_url) {
+                    loginLink.href = window.wasm.get_login_url(apiKey);
+                    loginLink.textContent = 'Login to get access token';
+                } else {
+                    loginLink.href = '#';
+                    loginLink.textContent = 'Enter API key first';
+                }
+            });
+        }
+
+        // Connect to ticker (called from button onclick)
+        function connect() {
             const apiKey = document.getElementById('apiKey').value.trim();
             const accessToken = document.getElementById('accessToken').value.trim();
             const tokens = document.getElementById('tokens').value.trim();
@@ -249,28 +250,19 @@
             document.getElementById('connectBtn').disabled = true;
 
             try {
-                await wasm.start_ticker(apiKey, accessToken, tokens);
+                if (window.wasm && window.wasm.start_ticker) {
+                    window.wasm.start_ticker(apiKey, accessToken, tokens);
+                } else {
+                    throw new Error('WASM not loaded');
+                }
             } catch (e) {
                 console.error('Connection error:', e);
                 document.getElementById('connectBtn').disabled = false;
             }
-        };
+        }
 
-        // Update login link when API key changes
-        document.getElementById('apiKey').addEventListener('input', function(e) {
-            const apiKey = e.target.value.trim();
-            const loginLink = document.getElementById('loginLink');
-            if (apiKey && wasm) {
-                loginLink.href = wasm.get_login_url(apiKey);
-                loginLink.textContent = 'Login to get access token';
-            } else {
-                loginLink.href = '#';
-                loginLink.textContent = 'Enter API key first';
-            }
-        });
-
-        // Initialize on page load
-        initWasm();
+        // Start waiting for WASM
+        waitForWasm();
     </script>
 </body>
 </html>
