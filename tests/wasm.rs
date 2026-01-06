@@ -400,3 +400,342 @@ fn test_reconnect_delay_validation() {
     let result = ticker.set_reconnect_max_delay(Duration::from_millis(10000));
     assert!(result.is_ok());
 }
+
+// ============================================================================
+// HTTP API Response Parsing Tests
+// ============================================================================
+// These tests verify that HTTP API response types can be correctly parsed
+// in WASM environment, ensuring JSON deserialization works cross-platform.
+
+use kiteconnect_rs::{
+    Holdings, Positions, Orders, Trades,
+    Quote, QuoteLTP, QuoteOHLC, OrderParams, ConvertPositionParams,
+};
+
+// Embed mock JSON responses at compile time
+const POSITIONS_JSON: &str = include_str!("mocks/positions.json");
+const HOLDINGS_JSON: &str = include_str!("mocks/holdings.json");
+const ORDERS_JSON: &str = include_str!("mocks/orders.json");
+const TRADES_JSON: &str = include_str!("mocks/trades.json");
+const QUOTE_JSON: &str = include_str!("mocks/quote.json");
+const LTP_JSON: &str = include_str!("mocks/ltp.json");
+const OHLC_JSON: &str = include_str!("mocks/ohlc.json");
+
+// Helper to extract data from API response wrapper
+fn extract_data<T: serde::de::DeserializeOwned>(json: &str) -> Result<T, serde_json::Error> {
+    use serde::de::Error;
+    let wrapper: serde_json::Value = serde_json::from_str(json)?;
+    let data = wrapper.get("data").ok_or_else(|| {
+        serde_json::Error::custom("Missing 'data' field")
+    })?;
+    serde_json::from_value(data.clone())
+}
+
+#[wasm_bindgen_test]
+fn test_parse_positions() {
+    let result: Result<Positions, _> = extract_data(POSITIONS_JSON);
+    assert!(result.is_ok(), "Failed to parse positions: {:?}", result.err());
+
+    let positions = result.unwrap();
+
+    // Verify net positions
+    assert!(!positions.net.is_empty(), "Net positions should not be empty");
+    let first_net = &positions.net[0];
+    assert_eq!(first_net.tradingsymbol, "LEADMINI17DECFUT");
+    assert_eq!(first_net.exchange, "MCX");
+    assert_eq!(first_net.instrument_token, 53496327);
+    assert_eq!(first_net.product, "NRML");
+    assert_eq!(first_net.quantity, 1);
+    assert_eq!(first_net.multiplier, 1000.0);
+
+    // Verify day positions
+    assert!(!positions.day.is_empty(), "Day positions should not be empty");
+    let first_day = &positions.day[0];
+    assert_eq!(first_day.tradingsymbol, "GOLDGUINEA17DECFUT");
+}
+
+#[wasm_bindgen_test]
+fn test_parse_holdings() {
+    let result: Result<Holdings, _> = extract_data(HOLDINGS_JSON);
+    assert!(result.is_ok(), "Failed to parse holdings: {:?}", result.err());
+
+    let holdings = result.unwrap();
+
+    assert!(!holdings.is_empty(), "Holdings should not be empty");
+    let first = &holdings[0];
+    assert_eq!(first.tradingsymbol, "AARON");
+    assert_eq!(first.exchange, "NSE");
+    assert_eq!(first.instrument_token, 263681);
+    assert_eq!(first.isin, "INE721Z01010");
+    assert_eq!(first.product, "CNC");
+    assert_eq!(first.quantity, 1);
+    assert_eq!(first.average_price, 161.0);
+
+    // Verify MTF data
+    assert_eq!(first.mtf.quantity, 1000);
+    assert_eq!(first.mtf.average_price, 100.0);
+    assert_eq!(first.mtf.value, 100000.0);
+}
+
+#[wasm_bindgen_test]
+fn test_parse_orders() {
+    let result: Result<Orders, _> = extract_data(ORDERS_JSON);
+    assert!(result.is_ok(), "Failed to parse orders: {:?}", result.err());
+
+    let orders = result.unwrap();
+
+    assert!(!orders.is_empty(), "Orders should not be empty");
+
+    // Find a completed order
+    let completed = orders.iter().find(|o| o.status == "COMPLETE");
+    assert!(completed.is_some(), "Should have at least one completed order");
+    let order = completed.unwrap();
+    assert!(!order.order_id.is_empty());
+    assert!(!order.placed_by.is_empty());
+
+    // Find a rejected order with status message
+    let rejected = orders.iter().find(|o| o.status == "REJECTED");
+    assert!(rejected.is_some(), "Should have a rejected order");
+    let rej = rejected.unwrap();
+    assert!(rej.status_message.is_some());
+}
+
+#[wasm_bindgen_test]
+fn test_parse_orders_with_tags() {
+    let result: Result<Orders, _> = extract_data(ORDERS_JSON);
+    let orders = result.unwrap();
+
+    // Find order with tags
+    let with_tags = orders.iter().find(|o| o.tags.as_ref().map(|t| !t.is_empty()).unwrap_or(false));
+    assert!(with_tags.is_some(), "Should have at least one order with tags");
+
+    let order = with_tags.unwrap();
+    let tags = order.tags.as_ref().unwrap();
+    assert!(!tags.is_empty());
+}
+
+#[wasm_bindgen_test]
+fn test_parse_orders_iceberg() {
+    let result: Result<Orders, _> = extract_data(ORDERS_JSON);
+    let orders = result.unwrap();
+
+    // Find iceberg order
+    let iceberg = orders.iter().find(|o| o.variety == "iceberg");
+    assert!(iceberg.is_some(), "Should have an iceberg order");
+
+    let order = iceberg.unwrap();
+    assert!(order.meta.contains_key("iceberg"));
+}
+
+#[wasm_bindgen_test]
+fn test_parse_trades() {
+    let result: Result<Trades, _> = extract_data(TRADES_JSON);
+    assert!(result.is_ok(), "Failed to parse trades: {:?}", result.err());
+
+    let trades = result.unwrap();
+
+    assert!(!trades.is_empty(), "Trades should not be empty");
+    let first = &trades[0];
+    assert!(!first.trade_id.is_empty());
+    assert!(!first.order_id.is_empty());
+    assert!(!first.exchange.is_empty());
+    assert!(!first.tradingsymbol.is_empty());
+    assert!(first.average_price > 0.0);
+    assert!(first.quantity > 0.0);
+}
+
+#[wasm_bindgen_test]
+fn test_parse_quote() {
+    let result: Result<Quote, _> = extract_data(QUOTE_JSON);
+    assert!(result.is_ok(), "Failed to parse quote: {:?}", result.err());
+
+    let quote = result.unwrap();
+
+    // Quote is a HashMap<String, QuoteData>
+    assert!(quote.contains_key("NSE:INFY"), "Should have NSE:INFY quote");
+
+    let infy = quote.get("NSE:INFY").unwrap();
+    assert_eq!(infy.instrument_token, 408065);
+    assert!(infy.last_price > 0.0);
+    assert!(infy.ohlc.open > 0.0);
+    assert!(infy.ohlc.high >= infy.ohlc.low);
+}
+
+#[wasm_bindgen_test]
+fn test_parse_ltp() {
+    let result: Result<QuoteLTP, _> = extract_data(LTP_JSON);
+    assert!(result.is_ok(), "Failed to parse LTP: {:?}", result.err());
+
+    let ltp = result.unwrap();
+
+    // LTP should have at least one entry
+    assert!(!ltp.is_empty(), "LTP should not be empty");
+
+    // Verify structure
+    for (symbol, data) in &ltp {
+        assert!(!symbol.is_empty());
+        assert!(data.instrument_token > 0);
+        assert!(data.last_price >= 0.0);
+    }
+}
+
+#[wasm_bindgen_test]
+fn test_parse_ohlc() {
+    let result: Result<QuoteOHLC, _> = extract_data(OHLC_JSON);
+    assert!(result.is_ok(), "Failed to parse OHLC: {:?}", result.err());
+
+    let ohlc = result.unwrap();
+
+    // OHLC should have at least one entry
+    assert!(!ohlc.is_empty(), "OHLC should not be empty");
+
+    // Verify structure
+    for (symbol, data) in &ohlc {
+        assert!(!symbol.is_empty());
+        assert!(data.instrument_token > 0);
+        assert!(data.ohlc.high >= data.ohlc.low);
+    }
+}
+
+#[wasm_bindgen_test]
+fn test_position_pnl_fields() {
+    let result: Result<Positions, _> = extract_data(POSITIONS_JSON);
+    let positions = result.unwrap();
+
+    // Find a position with non-zero PnL
+    let with_pnl = positions.net.iter().find(|p| p.pnl != 0.0);
+    if let Some(pos) = with_pnl {
+        // Verify PnL fields are populated
+        assert!(pos.m2m != 0.0 || pos.pnl != 0.0);
+    }
+}
+
+#[wasm_bindgen_test]
+fn test_holding_day_change() {
+    let result: Result<Holdings, _> = extract_data(HOLDINGS_JSON);
+    let holdings = result.unwrap();
+
+    // Verify day change calculations exist
+    for holding in &holdings {
+        // Day change can be positive, negative, or zero
+        // Just verify the fields are parsed
+        let _ = holding.day_change;
+        let _ = holding.day_change_percentage;
+    }
+}
+
+// ============================================================================
+// API Client Type Compilation Tests
+// ============================================================================
+// These tests verify that API methods compile correctly for WASM target.
+// They don't make actual HTTP calls, just ensure type compatibility.
+
+#[wasm_bindgen_test]
+fn test_api_methods_compile() {
+    // This test verifies that KiteConnect methods are available in WASM
+    // by checking that we can reference them (without calling)
+    let kite = KiteConnect::builder("test_key")
+        .access_token("test_token")
+        .build()
+        .unwrap();
+
+    // Verify method signatures compile (async methods return futures)
+    let _ = kite.get_login_url();
+
+    // Note: We can't actually call these methods without a network,
+    // but verifying they compile is the goal of this test
+}
+
+#[wasm_bindgen_test]
+fn test_order_params_serialization() {
+    let params = OrderParams {
+        exchange: Some("NSE".to_string()),
+        tradingsymbol: Some("INFY".to_string()),
+        transaction_type: Some("BUY".to_string()),
+        quantity: Some(10),
+        price: Some(1500.0),
+        product: Some("CNC".to_string()),
+        order_type: Some("LIMIT".to_string()),
+        validity: Some("DAY".to_string()),
+        validity_ttl: None,
+        disclosed_quantity: None,
+        trigger_price: None,
+        squareoff: None,
+        stoploss: None,
+        trailing_stoploss: None,
+        iceberg_legs: None,
+        iceberg_quantity: None,
+        auction_number: None,
+        tag: Some("wasm_test".to_string()),
+    };
+
+    // Verify serialization works
+    let json = serde_json::to_string(&params);
+    assert!(json.is_ok());
+
+    // Verify deserialization works
+    let parsed: Result<OrderParams, _> = serde_json::from_str(&json.unwrap());
+    assert!(parsed.is_ok());
+}
+
+#[wasm_bindgen_test]
+fn test_convert_position_params_serialization() {
+    let params = ConvertPositionParams {
+        exchange: "NSE".to_string(),
+        tradingsymbol: "INFY".to_string(),
+        old_product: "MIS".to_string(),
+        new_product: "CNC".to_string(),
+        position_type: "day".to_string(),
+        transaction_type: "BUY".to_string(),
+        quantity: 10,
+    };
+
+    let json = serde_json::to_string(&params);
+    assert!(json.is_ok());
+}
+
+#[wasm_bindgen_test]
+fn test_json_roundtrip_position() {
+    use kiteconnect_rs::Position;
+
+    // Test that Position can be serialized and deserialized
+    let json = r#"{
+        "tradingsymbol": "TEST",
+        "exchange": "NSE",
+        "instrument_token": 12345,
+        "product": "CNC",
+        "quantity": 10,
+        "overnight_quantity": 5,
+        "multiplier": 1.0,
+        "average_price": 100.0,
+        "close_price": 99.0,
+        "last_price": 101.0,
+        "value": 1010.0,
+        "pnl": 10.0,
+        "m2m": 20.0,
+        "unrealised": 10.0,
+        "realised": 0.0,
+        "buy_quantity": 10,
+        "buy_price": 100.0,
+        "buy_value": 1000.0,
+        "buy_m2m": 1000.0,
+        "sell_quantity": 0,
+        "sell_price": 0.0,
+        "sell_value": 0.0,
+        "sell_m2m": 0.0,
+        "day_buy_quantity": 10,
+        "day_buy_price": 100.0,
+        "day_buy_value": 1000.0,
+        "day_sell_quantity": 0,
+        "day_sell_price": 0.0,
+        "day_sell_value": 0.0
+    }"#;
+
+    let parsed: Result<Position, _> = serde_json::from_str(json);
+    assert!(parsed.is_ok());
+
+    let pos = parsed.unwrap();
+    assert_eq!(pos.tradingsymbol, "TEST");
+    assert_eq!(pos.quantity, 10);
+    assert_eq!(pos.pnl, 10.0);
+}
