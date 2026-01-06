@@ -1,16 +1,18 @@
+use crate::compat::{self, TaskHandle, WsMessage};
 use crate::models::time::Time;
 use crate::models::{DepthItem, Order, Tick, OHLC};
-use futures_util::{SinkExt, StreamExt};
+use async_channel::{Receiver, Sender};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::future::pending;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::{broadcast, mpsc, RwLock};
-use tokio::time::sleep;
-use tokio_tungstenite::{connect_async, tungstenite::Message, WebSocketStream};
 use url::Url;
+use web_time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::sync::RwLock;
+#[cfg(target_arch = "wasm32")]
+use std::sync::RwLock;
 
 // Mode represents available ticker modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -154,14 +156,15 @@ impl Default for AtomicTime {
 // Handle for controlling the ticker after it starts
 #[derive(Clone)]
 pub struct TickerHandle {
-    command_sender: mpsc::UnboundedSender<TickerCommand>, // sub, un-sub, set_mode
-    event_sender: broadcast::Sender<TickerEvent>,         // tick, error, message.
+    command_sender: Sender<TickerCommand>,
+    event_receiver: Receiver<TickerEvent>,
 }
 
 impl TickerHandle {
     pub async fn subscribe(&self, tokens: Vec<u32>) -> Result<(), TickerError> {
         self.command_sender
             .send(TickerCommand::Subscribe(tokens))
+            .await
             .map_err(|_| TickerError {
                 message: "Failed to send subscribe command".to_string(),
             })
@@ -170,6 +173,7 @@ impl TickerHandle {
     pub async fn unsubscribe(&self, tokens: Vec<u32>) -> Result<(), TickerError> {
         self.command_sender
             .send(TickerCommand::Unsubscribe(tokens))
+            .await
             .map_err(|_| TickerError {
                 message: "Failed to send unsubscribe command".to_string(),
             })
@@ -178,13 +182,14 @@ impl TickerHandle {
     pub async fn set_mode(&self, mode: Mode, tokens: Vec<u32>) -> Result<(), TickerError> {
         self.command_sender
             .send(TickerCommand::SetMode(mode, tokens))
+            .await
             .map_err(|_| TickerError {
                 message: "Failed to send set_mode command".to_string(),
             })
     }
 
-    pub fn subscribe_events(&self) -> broadcast::Receiver<TickerEvent> {
-        self.event_sender.subscribe()
+    pub fn subscribe_events(&self) -> Receiver<TickerEvent> {
+        self.event_receiver.clone()
     }
 }
 
@@ -199,15 +204,15 @@ pub struct Ticker {
     subscribed_tokens: Arc<RwLock<HashMap<u32, Option<Mode>>>>,
     last_ping_time: Arc<AtomicTime>,
     // channels
-    event_sender: broadcast::Sender<TickerEvent>,
-    command_receiver: Option<mpsc::UnboundedReceiver<TickerCommand>>,
-    command_sender: mpsc::UnboundedSender<TickerCommand>,
+    event_sender: Sender<TickerEvent>,
+    command_receiver: Option<Receiver<TickerCommand>>,
+    command_sender: Sender<TickerCommand>,
 }
 
 impl Ticker {
     pub fn new(api_key: String, access_token: String) -> (Self, TickerHandle) {
-        let (event_tx, _) = broadcast::channel(1000);
-        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = async_channel::unbounded();
+        let (command_tx, command_rx) = async_channel::unbounded();
 
         let ticker = Self {
             api_key,
@@ -226,7 +231,7 @@ impl Ticker {
 
         let handle = TickerHandle {
             command_sender: command_tx,
-            event_sender: event_tx,
+            event_receiver: event_rx,
         };
 
         (ticker, handle)
@@ -273,7 +278,8 @@ impl Ticker {
             if reconnect_attempt > self.reconnect_max_retries {
                 let _ = self
                     .event_sender
-                    .send(TickerEvent::NoReconnect(reconnect_attempt));
+                    .send(TickerEvent::NoReconnect(reconnect_attempt))
+                    .await;
                 return Err(TickerError {
                     message: "Maximum reconnect attempts reached".to_string(),
                 });
@@ -286,8 +292,9 @@ impl Ticker {
 
                 let _ = self
                     .event_sender
-                    .send(TickerEvent::Reconnect(reconnect_attempt, next_delay));
-                sleep(next_delay).await;
+                    .send(TickerEvent::Reconnect(reconnect_attempt, next_delay))
+                    .await;
+                compat::sleep(next_delay).await;
             }
 
             // Prepare ticker URL with required params.
@@ -300,9 +307,9 @@ impl Ticker {
                 .append_pair("access_token", &self.access_token);
 
             // Connect to WebSocket with timeout
-            let connection_future = connect_async(url.as_str());
-            match tokio::time::timeout(self.connect_timeout, connection_future).await {
-                Ok(Ok((ws_stream, _))) => {
+            let connection_future = compat::connect_ws(url.as_str());
+            match compat::timeout(self.connect_timeout, connection_future).await {
+                Ok(Ok(ws_stream)) => {
                     // Track if this is a reconnection before resetting counter
                     let is_reconnect = reconnect_attempt > 0;
 
@@ -310,7 +317,7 @@ impl Ticker {
                     reconnect_attempt = 0;
 
                     // Trigger connect event
-                    let _ = self.event_sender.send(TickerEvent::Connect);
+                    let _ = self.event_sender.send(TickerEvent::Connect).await;
 
                     // Set last ping time
                     self.last_ping_time.set(SystemTime::now());
@@ -320,7 +327,8 @@ impl Ticker {
                         if let Err(e) = self.resubscribe().await {
                             let _ = self
                                 .event_sender
-                                .send(TickerEvent::Error(format!("Resubscribe failed: {}", e)));
+                                .send(TickerEvent::Error(format!("Resubscribe failed: {}", e)))
+                                .await;
                         }
                     }
 
@@ -329,7 +337,8 @@ impl Ticker {
                         let error_msg = e.message.clone();
                         let _ = self
                             .event_sender
-                            .send(TickerEvent::Error(error_msg.clone()));
+                            .send(TickerEvent::Error(error_msg.clone()))
+                            .await;
 
                         if !self.auto_reconnect {
                             return Err(TickerError { message: error_msg });
@@ -340,7 +349,8 @@ impl Ticker {
                     let error_msg = format!("Connection failed: {}", e);
                     let _ = self
                         .event_sender
-                        .send(TickerEvent::Error(error_msg.clone()));
+                        .send(TickerEvent::Error(error_msg.clone()))
+                        .await;
 
                     if !self.auto_reconnect {
                         return Err(TickerError { message: error_msg });
@@ -351,7 +361,8 @@ impl Ticker {
                         format!("Connection timed out after {:?}", self.connect_timeout);
                     let _ = self
                         .event_sender
-                        .send(TickerEvent::Error(error_msg.clone()));
+                        .send(TickerEvent::Error(error_msg.clone()))
+                        .await;
 
                     if !self.auto_reconnect {
                         return Err(TickerError { message: error_msg });
@@ -365,16 +376,19 @@ impl Ticker {
 
     async fn handle_connection(
         &mut self,
-        ws_stream: WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        mut ws_stream: Box<dyn compat::WebSocketStream>,
     ) -> Result<(), TickerError> {
+        // Channel for outgoing WebSocket messages
+        let (ws_tx, ws_rx) = async_channel::unbounded::<String>();
+
         // Run watcher to check last ping time and reconnect if required
-        let reconnect_handler = if self.auto_reconnect {
+        let reconnect_handler: Option<TaskHandle> = if self.auto_reconnect {
             let sender_checker = self.event_sender.clone();
             let last_ping_time = self.last_ping_time.clone();
 
-            Some(tokio::spawn(async move {
+            Some(compat::spawn(async move {
                 loop {
-                    sleep(CONNECTION_CHECK_INTERVAL).await;
+                    compat::sleep(CONNECTION_CHECK_INTERVAL).await;
                     let last_ping = last_ping_time.get();
                     if SystemTime::now()
                         .duration_since(last_ping)
@@ -382,9 +396,11 @@ impl Ticker {
                         > DATA_TIMEOUT_INTERVAL
                     {
                         // Connection timeout detected - send error event
-                        let _ = sender_checker.send(TickerEvent::Error(
-                            "Data timeout: No data received for 5 seconds".to_string(),
-                        ));
+                        let _ = sender_checker
+                            .send(TickerEvent::Error(
+                                "Data timeout: No data received for 5 seconds".to_string(),
+                            ))
+                            .await;
                         return;
                     }
                 }
@@ -393,24 +409,22 @@ impl Ticker {
             None
         };
 
-        // Websocket split
-        let (mut write, mut read) = ws_stream.split();
-
-        // Channel for sending messages to WebSocket
-        let sender = self.event_sender.clone();
-
         // Task to handle command processing
-        let command_handler = if let Some(command_rx) = self.command_receiver.take() {
+        let command_handler: Option<TaskHandle> = if let Some(command_rx) = self.command_receiver.take() {
             let subscribed_tokens = self.subscribed_tokens.clone();
+            let sender = self.event_sender.clone();
+            let ws_tx_clone = ws_tx.clone();
 
-            Some(tokio::spawn(async move {
-                let mut command_rx = command_rx;
-                while let Some(command) = command_rx.recv().await {
-                    match command {
+            Some(compat::spawn(async move {
+                while let Ok(command) = command_rx.recv().await {
+                    let message = match command {
                         TickerCommand::Subscribe(tokens) => {
                             // Store tokens
                             {
+                                #[cfg(not(target_arch = "wasm32"))]
                                 let mut subscribed = subscribed_tokens.write().await;
+                                #[cfg(target_arch = "wasm32")]
+                                let mut subscribed = subscribed_tokens.write().unwrap();
                                 for token in &tokens {
                                     subscribed.insert(*token, None);
                                 }
@@ -420,20 +434,15 @@ impl Ticker {
                                 action_type: "subscribe".to_string(),
                                 value: serde_json::to_value(&tokens).unwrap(),
                             };
-
-                            if let Ok(message) = serde_json::to_string(&input) {
-                                if let Err(e) = write.send(Message::Text(message.into())).await {
-                                    let _ = sender.send(TickerEvent::Error(format!(
-                                        "Failed to send WebSocket message: {}",
-                                        e
-                                    )));
-                                }
-                            }
+                            serde_json::to_string(&input).ok()
                         }
                         TickerCommand::Unsubscribe(tokens) => {
                             // Remove tokens
                             {
+                                #[cfg(not(target_arch = "wasm32"))]
                                 let mut subscribed = subscribed_tokens.write().await;
+                                #[cfg(target_arch = "wasm32")]
+                                let mut subscribed = subscribed_tokens.write().unwrap();
                                 for token in &tokens {
                                     subscribed.remove(token);
                                 }
@@ -443,20 +452,15 @@ impl Ticker {
                                 action_type: "unsubscribe".to_string(),
                                 value: serde_json::to_value(&tokens).unwrap(),
                             };
-
-                            if let Ok(message) = serde_json::to_string(&input) {
-                                if let Err(e) = write.send(Message::Text(message.into())).await {
-                                    let _ = sender.send(TickerEvent::Error(format!(
-                                        "Failed to send WebSocket message: {}",
-                                        e
-                                    )));
-                                }
-                            }
+                            serde_json::to_string(&input).ok()
                         }
                         TickerCommand::SetMode(mode, tokens) => {
                             // Update mode
                             {
+                                #[cfg(not(target_arch = "wasm32"))]
                                 let mut subscribed = subscribed_tokens.write().await;
+                                #[cfg(target_arch = "wasm32")]
+                                let mut subscribed = subscribed_tokens.write().unwrap();
                                 for token in &tokens {
                                     subscribed.insert(*token, Some(mode));
                                 }
@@ -466,15 +470,18 @@ impl Ticker {
                                 action_type: "mode".to_string(),
                                 value: serde_json::to_value(&(mode.to_string(), &tokens)).unwrap(),
                             };
+                            serde_json::to_string(&input).ok()
+                        }
+                    };
 
-                            if let Ok(message) = serde_json::to_string(&input) {
-                                if let Err(e) = write.send(Message::Text(message.into())).await {
-                                    let _ = sender.send(TickerEvent::Error(format!(
-                                        "Failed to send WebSocket message: {}",
-                                        e
-                                    )));
-                                }
-                            }
+                    if let Some(msg) = message {
+                        if let Err(e) = ws_tx_clone.send(msg).await {
+                            let _ = sender
+                                .send(TickerEvent::Error(format!(
+                                    "Failed to queue WebSocket message: {}",
+                                    e
+                                )))
+                                .await;
                         }
                     }
                 }
@@ -483,109 +490,106 @@ impl Ticker {
             None
         };
 
-        // Handle incoming messages
-        let message_handler = {
-            let sender = self.event_sender.clone();
-            let last_ping_time = self.last_ping_time.clone();
+        // Main WebSocket loop - handles both reading and writing
+        let event_sender = self.event_sender.clone();
+        let last_ping_time = self.last_ping_time.clone();
 
-            tokio::spawn(async move {
-                while let Some(msg) = read.next().await {
-                    match msg {
-                        Ok(Message::Binary(data)) => {
-                            // Update last ping time
-                            last_ping_time.set(SystemTime::now());
-                            // Trigger message event
-                            let _ = sender.send(TickerEvent::Message(data.to_vec()));
+        loop {
+            // First, send any pending messages (non-blocking)
+            while let Ok(msg) = ws_rx.try_recv() {
+                if let Err(e) = ws_stream.send_text(msg).await {
+                    let _ = event_sender
+                        .send(TickerEvent::Error(format!(
+                            "Failed to send WebSocket message: {}",
+                            e
+                        )))
+                        .await;
+                }
+            }
 
-                            // Parse binary message and trigger tick events
-                            match Ticker::parse_binary(&data) {
-                                Ok(ticks) => {
-                                    for tick in ticks {
-                                        let _ = sender.send(TickerEvent::Tick(tick));
-                                    }
-                                }
-                                Err(e) => {
-                                    let _ = sender
-                                        .send(TickerEvent::Error(format!("Parse error: {}", e)));
-                                }
+            // Then, receive from WebSocket with a short timeout to allow checking for sends
+            let recv_result = compat::timeout(Duration::from_millis(100), ws_stream.recv()).await;
+
+            match recv_result {
+                Ok(Some(Ok(WsMessage::Binary(data)))) => {
+                    // Update last ping time
+                    last_ping_time.set(SystemTime::now());
+                    // Trigger message event
+                    let _ = event_sender.send(TickerEvent::Message(data.clone())).await;
+
+                    // Parse binary message and trigger tick events
+                    match Ticker::parse_binary(&data) {
+                        Ok(ticks) => {
+                            for tick in ticks {
+                                let _ = event_sender.send(TickerEvent::Tick(tick)).await;
                             }
                         }
-                        Ok(Message::Text(text)) => {
-                            // Update last ping time
-                            last_ping_time.set(SystemTime::now());
-
-                            // Trigger message event
-                            let _ = sender.send(TickerEvent::Message(text.as_bytes().to_vec()));
-
-                            // Process text message
-                            Ticker::process_text_message(&text, &sender).await;
-                        }
-                        Ok(Message::Close(close_frame)) => {
-                            // Update last ping time
-                            last_ping_time.set(SystemTime::now());
-
-                            let (code, reason) = if let Some(frame) = close_frame {
-                                (frame.code.into(), frame.reason.to_string())
-                            } else {
-                                (1000, "Normal closure".to_string())
-                            };
-                            let _ = sender.send(TickerEvent::Close(code, reason));
-                            break;
-                        }
                         Err(e) => {
-                            let _ =
-                                sender.send(TickerEvent::Error(format!("WebSocket error: {}", e)));
-                            break;
+                            let _ = event_sender
+                                .send(TickerEvent::Error(format!("Parse error: {}", e)))
+                                .await;
                         }
-                        _ => {}
                     }
                 }
-            })
-        };
+                Ok(Some(Ok(WsMessage::Text(text)))) => {
+                    // Update last ping time
+                    last_ping_time.set(SystemTime::now());
 
-        // wait for any one to finish and kill all when anyone does return.
-        let mut msg = message_handler;
-        let mut rec = reconnect_handler;
-        let mut cmd = command_handler;
-        // used mut ref as we don't want to own it, so it will be used below to abort
+                    // Trigger message event
+                    let _ = event_sender
+                        .send(TickerEvent::Message(text.as_bytes().to_vec()))
+                        .await;
 
-        tokio::select! {
-            _ = &mut msg => {},
-            _ = async {
-                match rec.as_mut() {
-                    Some(h) => { h.await.ok(); },
-                    None => pending().await, // Never completes
+                    // Process text message
+                    Self::process_text_message(&text, &event_sender).await;
                 }
-            } => {},
-            _ = async {
-                match cmd.as_mut() {
-                    Some(h) => { h.await.ok(); },
-                    None => pending().await, // Never completes
+                Ok(Some(Ok(WsMessage::Close(close_info)))) => {
+                    // Update last ping time
+                    last_ping_time.set(SystemTime::now());
+
+                    let (code, reason) = close_info.unwrap_or((1000, "Normal closure".to_string()));
+                    let _ = event_sender.send(TickerEvent::Close(code, reason)).await;
+                    break;
                 }
-            } => {},
+                Ok(Some(Err(e))) => {
+                    let _ = event_sender
+                        .send(TickerEvent::Error(format!("WebSocket error: {}", e)))
+                        .await;
+                    break;
+                }
+                Ok(None) => {
+                    // WebSocket closed
+                    break;
+                }
+                Err(_) => {
+                    // Timeout - continue loop to check for pending sends
+                    continue;
+                }
+            }
         }
 
-        msg.abort();
-        if let Some(h) = rec {
+        // Cleanup: abort spawned tasks
+        if let Some(h) = reconnect_handler {
             h.abort();
         }
-        if let Some(h) = cmd {
+        if let Some(h) = command_handler {
             h.abort();
         }
+
         Ok(())
     }
 
-    async fn process_text_message(text: &str, sender: &broadcast::Sender<TickerEvent>) {
+    async fn process_text_message(text: &str, sender: &Sender<TickerEvent>) {
         if let Ok(msg) = serde_json::from_str::<IncomingMessage>(text) {
             match msg.message_type.as_str() {
                 MESSAGE_ERROR => {
                     if let Ok(error_msg) = serde_json::from_value::<String>(msg.data) {
-                        let _ = sender.send(TickerEvent::Error(error_msg));
+                        let _ = sender.send(TickerEvent::Error(error_msg)).await;
                     }
                 }
                 MESSAGE_ORDER => {
                     if let Ok(order_msg) = serde_json::from_str::<OrderUpdateMessage>(text) {
-                        let _ = sender.send(TickerEvent::OrderUpdate(order_msg.data));
+                        let _ = sender.send(TickerEvent::OrderUpdate(order_msg.data)).await;
                     }
                 }
                 _ => {}
@@ -598,7 +602,10 @@ impl Ticker {
         let mut mode_groups: HashMap<Mode, Vec<u32>> = HashMap::new();
 
         {
+            #[cfg(not(target_arch = "wasm32"))]
             let subscribed = self.subscribed_tokens.read().await;
+            #[cfg(target_arch = "wasm32")]
+            let subscribed = self.subscribed_tokens.read().unwrap();
             for (&token, &mode_opt) in subscribed.iter() {
                 tokens.push(token);
                 if let Some(mode) = mode_opt {
@@ -611,6 +618,7 @@ impl Ticker {
         if !tokens.is_empty() {
             self.command_sender
                 .send(TickerCommand::Subscribe(tokens))
+                .await
                 .map_err(|_| TickerError {
                     message: "Failed to resubscribe".to_string(),
                 })?;
@@ -621,6 +629,7 @@ impl Ticker {
             if !mode_tokens.is_empty() {
                 self.command_sender
                     .send(TickerCommand::SetMode(mode, mode_tokens))
+                    .await
                     .map_err(|_| TickerError {
                         message: "Failed to set mode during resubscribe".to_string(),
                     })?;

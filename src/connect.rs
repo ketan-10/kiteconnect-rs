@@ -1,6 +1,6 @@
 use crate::constants::{Endpoints, app_constants::*};
 use reqwest::Client;
-use std::time::Duration;
+use web_time::Duration;
 
 pub struct KiteConnect {
     pub(crate) api_key: String,
@@ -85,9 +85,19 @@ impl KiteConnectBuilder {
     }
 
     pub fn build(self) -> Result<KiteConnect, reqwest::Error> {
-        let timeout = self.timeout.unwrap_or(DEFAULT_TIMEOUT);
         let http_client = match self.http_client {
-            None => Client::builder().timeout(timeout).build()?,
+            None => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let timeout = self.timeout.unwrap_or(DEFAULT_TIMEOUT);
+                    Client::builder().timeout(timeout).build()?
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    // WASM doesn't support timeout on reqwest
+                    Client::builder().build()?
+                }
+            }
             Some(client) => client,
         };
         Ok(KiteConnect {

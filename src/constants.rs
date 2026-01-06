@@ -1,5 +1,5 @@
 pub mod app_constants {
-    use std::time::Duration;
+    use web_time::Duration;
 
     pub const DEFAULT_BASE_URL: &str = "https://api.kite.trade";
     pub const KITE_BASE_URL: &str = "https://kite.zerodha.com";

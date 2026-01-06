@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 use base64::{Engine as _, engine::general_purpose};
 use kiteconnect_rs::{DepthItem, Mode, Ticker, TickerBuilder};
 use std::fs;

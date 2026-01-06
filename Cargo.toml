@@ -19,24 +19,51 @@ exclude = [
 ]
 
 [dependencies]
-reqwest = { version = "0.12.23", features = ["json", "blocking"] }
+# Cross-platform dependencies (work on both native and WASM)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sha2 = "0.10.9"
-tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 csv = "1.3"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 indoc = "2.0.6"
-tokio-tungstenite = { version = "0.27", features = ["native-tls"] }
 url = "2.4"
-futures-util = "0.3"
+futures-util = { version = "0.3", features = ["sink"] }
 log = "0.4"
+async-trait = "0.1"
 
-[dev-dependencies]
+# Cross-platform time (drop-in replacement for std::time)
+web-time = "1.1"
+
+# Cross-platform channels (replaces tokio::sync)
+async-channel = "2.3"
+
+# Native-only dependencies
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros", "sync"] }
+tokio-tungstenite = { version = "0.27", features = ["rustls-tls-native-roots"] }
+
+# WASM-only dependencies
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+gloo-timers = { version = "0.3", features = ["futures"] }
+gloo-net = "0.6"
+js-sys = "0.3"
+
+# Native-only dev dependencies
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 mockito = "1.5"
 httpmock = "0.7"
 wiremock = "0.6"
 tokio-test = "0.4"
 tempfile = "3.8"
+
+# Cross-platform dev dependencies
+[dev-dependencies]
 base64 = "0.22"
+
+# WASM-only dev dependencies
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

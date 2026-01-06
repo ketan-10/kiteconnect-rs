@@ -1,3 +1,4 @@
+pub mod compat;
 pub mod connect;
 
 pub mod http;

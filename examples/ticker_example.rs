@@ -12,7 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     // Subscribe to events before starting
-    let mut event_receiver = handle.subscribe_events();
+    let event_receiver = handle.subscribe_events();
 
     // Clone handle for event handler task
     let event_handle_clone = handle.clone();
