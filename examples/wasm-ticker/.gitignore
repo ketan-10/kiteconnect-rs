@@ -1,0 +1,7 @@
+# Build outputs
+/target
+/pkg
+/dist
+
+# Lock file (this is an example, not a library)
+Cargo.lock

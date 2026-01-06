@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kite Connect RS - WASM Ticker Example</title>
+    <link data-trunk rel="rust" href="Cargo.toml" data-wasm-opt="z" />
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+            color: #333;
+        }
+        h1 {
+            color: #387ed1;
+            margin-bottom: 5px;
+        }
+        .subtitle {
+            color: #666;
+            margin-bottom: 20px;
+        }
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 600;
+            color: #555;
+        }
+        input[type="text"], input[type="password"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        input:focus {
+            outline: none;
+            border-color: #387ed1;
+        }
+        .hint {
+            font-size: 12px;
+            color: #888;
+            margin-top: 4px;
+        }
+        button {
+            background: #387ed1;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        button:hover {
+            background: #2d6ab8;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        button.secondary {
+            background: #666;
+        }
+        button.secondary:hover {
+            background: #555;
+        }
+        .status {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+        .status.disconnected {
+            background: #ffebee;
+            color: #c62828;
+        }
+        .status.connecting {
+            background: #fff3e0;
+            color: #ef6c00;
+        }
+        .status.connected {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+        .status.error {
+            background: #ffebee;
+            color: #c62828;
+        }
+        #output {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 4px;
+            height: 400px;
+            overflow-y: auto;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        .log-entry {
+            margin-bottom: 4px;
+        }
+        .timestamp {
+            color: #888;
+        }
+        .success {
+            color: #4caf50;
+        }
+        .error {
+            color: #f44336;
+        }
+        .warning {
+            color: #ff9800;
+        }
+        .tick {
+            color: #2196f3;
+        }
+        .order {
+            color: #9c27b0;
+        }
+        #output b {
+            color: #fff;
+        }
+        .header-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 15px;
+        }
+        .login-link {
+            font-size: 13px;
+            color: #387ed1;
+            text-decoration: none;
+        }
+        .login-link:hover {
+            text-decoration: underline;
+        }
+        .note {
+            background: #e3f2fd;
+            border-left: 4px solid #2196f3;
+            padding: 12px 15px;
+            margin-bottom: 20px;
+            font-size: 13px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Kite Connect RS</h1>
+    <p class="subtitle">WASM Ticker Example - Real-time market data in the browser</p>
+
+    <div class="note">
+        <strong>Note:</strong> You need valid Kite Connect API credentials to use this example.
+        <a href="#" id="loginLink" target="_blank">Get your access token</a> by logging in first.
+    </div>
+
+    <div class="card">
+        <h3>Connection Settings</h3>
+        <div class="form-group">
+            <label for="apiKey">API Key</label>
+            <input type="text" id="apiKey" placeholder="Your Kite Connect API key">
+        </div>
+        <div class="form-group">
+            <label for="accessToken">Access Token</label>
+            <input type="password" id="accessToken" placeholder="Your access token">
+            <p class="hint">Get this after OAuth login. Valid for one trading day.</p>
+        </div>
+        <div class="form-group">
+            <label for="tokens">Instrument Tokens</label>
+            <input type="text" id="tokens" value="256265, 738561" placeholder="Comma-separated token list">
+            <p class="hint">Example: 256265 (NIFTY 50), 738561 (RELIANCE), 341249 (HDFC Bank)</p>
+        </div>
+        <button id="connectBtn" onclick="connect()">Connect</button>
+        <button class="secondary" onclick="wasm.clear_output()">Clear Log</button>
+        <span id="status" class="status disconnected">Disconnected</span>
+    </div>
+
+    <div class="card">
+        <div class="header-row">
+            <h3>Live Feed</h3>
+        </div>
+        <div id="output">
+            <div class="log-entry"><span class="timestamp">[--:--:--]</span> Waiting for connection...</div>
+        </div>
+    </div>
+
+    <script type="module">
+        // Trunk automatically initializes WASM and exports to window.wasm_bindgen
+        // We also support manual wasm-pack builds via ./pkg/
+
+        let wasm = null;
+
+        // Initialize WASM - works with both trunk and wasm-pack
+        async function initWasm() {
+            try {
+                // Try trunk's auto-initialized module first
+                if (window.wasm_bindgen) {
+                    wasm = window.wasm_bindgen;
+                    console.log('WASM initialized via trunk');
+                } else {
+                    // Fall back to manual wasm-pack import
+                    const module = await import('./pkg/wasm_ticker_example.js');
+                    await module.default();
+                    wasm = module;
+                    console.log('WASM initialized via wasm-pack');
+                }
+                window.wasm = wasm;
+                document.getElementById('connectBtn').disabled = false;
+            } catch (e) {
+                console.error('Failed to initialize WASM:', e);
+                document.getElementById('output').innerHTML =
+                    '<div class="log-entry"><span class="error">Failed to load WASM module. Run: trunk serve (or wasm-pack build --target web)</span></div>';
+            }
+        }
+
+        // Connect to ticker
+        window.connect = async function() {
+            const apiKey = document.getElementById('apiKey').value.trim();
+            const accessToken = document.getElementById('accessToken').value.trim();
+            const tokens = document.getElementById('tokens').value.trim();
+
+            if (!apiKey || !accessToken) {
+                alert('Please enter both API Key and Access Token');
+                return;
+            }
+
+            if (!tokens) {
+                alert('Please enter at least one instrument token');
+                return;
+            }
+
+            document.getElementById('connectBtn').disabled = true;
+
+            try {
+                await wasm.start_ticker(apiKey, accessToken, tokens);
+            } catch (e) {
+                console.error('Connection error:', e);
+                document.getElementById('connectBtn').disabled = false;
+            }
+        };
+
+        // Update login link when API key changes
+        document.getElementById('apiKey').addEventListener('input', function(e) {
+            const apiKey = e.target.value.trim();
+            const loginLink = document.getElementById('loginLink');
+            if (apiKey && wasm) {
+                loginLink.href = wasm.get_login_url(apiKey);
+                loginLink.textContent = 'Login to get access token';
+            } else {
+                loginLink.href = '#';
+                loginLink.textContent = 'Enter API key first';
+            }
+        });
+
+        // Initialize on page load
+        initWasm();
+    </script>
+</body>
+</html>
