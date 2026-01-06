@@ -16,7 +16,7 @@ impl KiteConnect {
 
     pub fn get_login_url(&self) -> String {
         format!(
-            "{}{} ?api_key={}&v={}",
+            "{}{}?api_key={}&v={}",
             KITE_BASE_URL,
             Endpoints::LOGIN_URL,
             self.api_key,
