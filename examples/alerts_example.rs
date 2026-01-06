@@ -5,22 +5,15 @@ use kiteconnect_rs::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = "<api_key>";
+    // Load environment variables from .env file
+    dotenvy::dotenv().ok();
+
+    let api_key = std::env::var("KITE_API_KEY")
+        .expect("KITE_API_KEY must be set in .env file");
+
     let mut kite = KiteConnect::builder(&api_key).build()?;
 
-    println!("Login URL: {}", kite.get_login_url());
-    println!("Press Enter request token after login...");
-    let mut request_token = String::new();
-    std::io::stdin().read_line(&mut request_token)?;
-
-    let api_secret = "<api_secret>";
-
-    let access_token = kite
-        .generate_session(&request_token.trim(), api_secret)
-        .await?
-        .access_token;
-
-    println!("Access Token: {}", access_token);
+    kite.set_access_token(&std::env::var("KITE_ACCESS_TOKEN").expect("KITE_ACCESS_TOKEN must be set in .env file"));
 
     println!("=== Alerts API Examples ===\n");
 

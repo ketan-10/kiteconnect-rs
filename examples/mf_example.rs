@@ -3,10 +3,13 @@ use std::error::Error;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Initialize KiteConnect with your API key
-    let mut kite = KiteConnect::builder("<api_key>").build()?;
+    dotenvy::dotenv().ok();
 
-    kite.set_access_token("<access_token>");
+    let api_key = std::env::var("KITE_API_KEY").expect("KITE_API_KEY not set");
+    let access_token = std::env::var("KITE_ACCESS_TOKEN").expect("KITE_ACCESS_TOKEN not set");
+
+    let mut kite = KiteConnect::builder(&api_key).build()?;
+    kite.set_access_token(&access_token);
 
     // Example: Get all mutual fund orders
     println!("=== Getting MF Orders ===");

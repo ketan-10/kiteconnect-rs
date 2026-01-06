@@ -4,8 +4,13 @@ use kiteconnect_rs::ticker::{Mode, Ticker, TickerEvent};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+
+    let api_key = std::env::var("KITE_API_KEY").expect("KITE_API_KEY not set");
+    let access_token = std::env::var("KITE_ACCESS_TOKEN").expect("KITE_ACCESS_TOKEN not set");
+
     // Create ticker and get handle
-    let (ticker, handle) = Ticker::builder("<api_key>", "<access_token>")
+    let (ticker, handle) = Ticker::builder(&api_key, &access_token)
         .auto_reconnect(true)
         .reconnect_max_retries(10)
         .connect_timeout(Duration::from_secs(10))

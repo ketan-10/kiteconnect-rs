@@ -5,12 +5,15 @@ use kiteconnect_rs::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+
+    let api_key = std::env::var("KITE_API_KEY").expect("KITE_API_KEY not set");
+    let access_token = std::env::var("KITE_ACCESS_TOKEN").expect("KITE_ACCESS_TOKEN not set");
+
     println!("=== Portfolio API Examples ===\n");
 
-    // Initialize KiteConnect (replace with your actual API key)
-    let mut kite = KiteConnectBuilder::new("<api_key>").build()?;
-
-    kite.set_access_token("<access_token>");
+    let mut kite = KiteConnectBuilder::new(&api_key).build()?;
+    kite.set_access_token(&access_token);
 
     // Example: Get holdings
     println!("==Fetching holdings...");

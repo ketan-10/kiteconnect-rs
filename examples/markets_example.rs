@@ -2,13 +2,12 @@ use kiteconnect_rs::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = "<api_key>";
+    dotenvy::dotenv().ok();
+
+    let api_key = std::env::var("KITE_API_KEY").expect("KITE_API_KEY not set");
+    let access_token = std::env::var("KITE_ACCESS_TOKEN").expect("KITE_ACCESS_TOKEN not set");
+
     let mut kite = KiteConnect::builder(&api_key).build()?;
-
-    // hardcoded access token for testing (expires in 24 hours)
-    let access_token = "<access_token>";
-
-    // Set access token (you would get this from the authentication flow)
     kite.set_access_token(&access_token);
 
     // Example: Get full quote for instruments
