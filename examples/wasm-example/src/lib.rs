@@ -1,11 +1,14 @@
-//! WASM Ticker Example
+//! WASM Example
 //!
 //! This example demonstrates how to use kiteconnect-rs in a browser environment.
+//! - Ticker: WebSocket streaming (works in browser)
+//! - API: HTTP calls (blocked by CORS in browser, for reference only)
 //!
-//! Build with: wasm-pack build --target web
-//! Then open index.html in a browser.
+//! Build with: trunk serve
+//! Then open http://localhost:8080 in a browser.
 
 use kiteconnect_rs::ticker::{Mode, Ticker, TickerEvent};
+use kiteconnect_rs::KiteConnect;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::closure::Closure;
 use web_sys::console;
@@ -50,6 +53,15 @@ pub fn init() {
 
         js_sys::Reflect::set(&wasm_obj, &JsValue::from_str("get_login_url"), get_login_url_fn.as_ref()).ok();
         get_login_url_fn.forget();
+
+        // Test API call (blocked by CORS, for reference)
+        let test_api_fn = Closure::wrap(Box::new(|api_key: String, access_token: String, endpoint: String| {
+            wasm_bindgen_futures::spawn_local(async move {
+                test_api(api_key, access_token, endpoint).await;
+            });
+        }) as Box<dyn Fn(String, String, String)>);
+        js_sys::Reflect::set(&wasm_obj, &JsValue::from_str("test_api"), test_api_fn.as_ref()).ok();
+        test_api_fn.forget();
 
         // Attach to window
         js_sys::Reflect::set(&window, &JsValue::from_str("wasm"), &wasm_obj).ok();
@@ -240,4 +252,59 @@ pub async fn start_ticker(api_key: String, access_token: String, tokens_str: Str
 #[wasm_bindgen]
 pub fn get_login_url(api_key: &str) -> String {
     format!("https://kite.zerodha.com/connect/login?v=3&api_key={}", api_key)
+}
+
+/// Test API endpoints (note: blocked by CORS in browser)
+async fn test_api(api_key: String, access_token: String, endpoint: String) {
+    append_to_output(&format!("Testing API: <b>{}</b> (may fail due to CORS)", endpoint));
+
+    let mut kite = match KiteConnect::builder(&api_key).build() {
+        Ok(k) => k,
+        Err(e) => {
+            append_to_output(&format!("<span class=\"error\">Failed to create client: {}</span>", e));
+            return;
+        }
+    };
+    kite.set_access_token(&access_token);
+
+    match endpoint.as_str() {
+        "profile" => {
+            match kite.get_user_profile().await {
+                Ok(profile) => {
+                    append_to_output("<span class=\"success\">Profile retrieved:</span>");
+                    append_to_output(&format!("  Name: <b>{}</b>", profile.user_name));
+                    append_to_output(&format!("  User ID: <b>{}</b>", profile.user_id));
+                }
+                Err(e) => append_to_output(&format!("<span class=\"error\">Error: {}</span>", e)),
+            }
+        }
+        "margins" => {
+            match kite.get_user_margins().await {
+                Ok(margins) => {
+                    append_to_output("<span class=\"success\">Margins retrieved:</span>");
+                    append_to_output(&format!("  Equity Net: <b>{:.2}</b>", margins.equity.net));
+                }
+                Err(e) => append_to_output(&format!("<span class=\"error\">Error: {}</span>", e)),
+            }
+        }
+        "holdings" => {
+            match kite.get_holdings().await {
+                Ok(holdings) => {
+                    append_to_output(&format!("<span class=\"success\">Holdings: {} items</span>", holdings.len()));
+                }
+                Err(e) => append_to_output(&format!("<span class=\"error\">Error: {}</span>", e)),
+            }
+        }
+        "orders" => {
+            match kite.get_orders().await {
+                Ok(orders) => {
+                    append_to_output(&format!("<span class=\"success\">Orders: {} items</span>", orders.len()));
+                }
+                Err(e) => append_to_output(&format!("<span class=\"error\">Error: {}</span>", e)),
+            }
+        }
+        _ => {
+            append_to_output(&format!("<span class=\"error\">Unknown endpoint: {}</span>", endpoint));
+        }
+    }
 }

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kite Connect RS - WASM Ticker Example</title>
+    <title>Kite Connect RS - WASM Example</title>
     <link data-trunk rel="rust" href="Cargo.toml" data-wasm-opt="z" />
     <style>
         * {
@@ -164,7 +164,7 @@
 </head>
 <body>
     <h1>Kite Connect RS</h1>
-    <p class="subtitle">WASM Ticker Example - Real-time market data in the browser</p>
+    <p class="subtitle">WASM Example - Ticker (WebSocket) & API testing</p>
 
     <div class="note">
         <strong>Note:</strong> You need valid Kite Connect API credentials to use this example.
@@ -187,9 +187,15 @@
             <input type="text" id="tokens" value="256265, 738561" placeholder="Comma-separated token list">
             <p class="hint">Example: 256265 (NIFTY 50), 738561 (RELIANCE), 341249 (HDFC Bank)</p>
         </div>
-        <button id="connectBtn" onclick="connect()" disabled>Connect</button>
+        <button id="connectBtn" onclick="connect()" disabled>Connect Ticker</button>
         <button class="secondary" onclick="window.wasm && window.wasm.clear_output()">Clear Log</button>
         <span id="status" class="status disconnected">Disconnected</span>
+
+        <h4 style="margin-top: 20px; margin-bottom: 10px;">Test HTTP APIs <span style="font-weight: normal; font-size: 12px; color: #888;">(blocked by CORS)</span></h4>
+        <button onclick="testApi('profile')" disabled class="api-btn secondary">Profile</button>
+        <button onclick="testApi('margins')" disabled class="api-btn secondary">Margins</button>
+        <button onclick="testApi('holdings')" disabled class="api-btn secondary">Holdings</button>
+        <button onclick="testApi('orders')" disabled class="api-btn secondary">Orders</button>
     </div>
 
     <div class="card">
@@ -214,6 +220,7 @@
         function onWasmReady() {
             console.log('WASM ready, enabling UI');
             document.getElementById('connectBtn').disabled = false;
+            document.querySelectorAll('.api-btn').forEach(btn => btn.disabled = false);
             document.getElementById('output').innerHTML =
                 '<div class="log-entry"><span class="success">WASM loaded. Ready to connect.</span></div>';
 
@@ -229,6 +236,19 @@
                     loginLink.textContent = 'Enter API key first';
                 }
             });
+        }
+
+        // Test API endpoint
+        function testApi(endpoint) {
+            const apiKey = document.getElementById('apiKey').value.trim();
+            const accessToken = document.getElementById('accessToken').value.trim();
+            if (!apiKey || !accessToken) {
+                alert('Please enter both API Key and Access Token');
+                return;
+            }
+            if (window.wasm && window.wasm.test_api) {
+                window.wasm.test_api(apiKey, accessToken, endpoint);
+            }
         }
 
         // Connect to ticker (called from button onclick)
