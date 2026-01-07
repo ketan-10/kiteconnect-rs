@@ -4,8 +4,21 @@
 //! - Ticker: WebSocket streaming (works in browser)
 //! - API: HTTP calls (blocked by CORS in browser, for reference only)
 //!
-//! Build with: trunk serve
-//! Then open http://localhost:8080 in a browser.
+//! ## Setup
+//!
+//! 1. Copy `.env.example` to `.env` and fill in your credentials:
+//!    ```bash
+//!    cp .env.example .env
+//!    ```
+//!
+//! 2. Run with trunk:
+//!    ```bash
+//!    trunk serve
+//!    ```
+//!
+//! 3. Open http://localhost:8080 in a browser
+//!
+//! Trunk automatically loads environment variables from `.env` at build time.
 
 use kiteconnect_rs::ticker::{Mode, Ticker, TickerEvent};
 use kiteconnect_rs::KiteConnect;
@@ -13,6 +26,18 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::closure::Closure;
 use web_sys::console;
 use web_time::Duration;
+
+/// Get default API key from compile-time environment variable (if set)
+#[wasm_bindgen]
+pub fn get_default_api_key() -> Option<String> {
+    option_env!("KITE_API_KEY").map(String::from)
+}
+
+/// Get default access token from compile-time environment variable (if set)
+#[wasm_bindgen]
+pub fn get_default_access_token() -> Option<String> {
+    option_env!("KITE_ACCESS_TOKEN").map(String::from)
+}
 
 /// Initialize panic hook for better error messages in browser console
 /// Also exposes functions to window.wasm for the HTML to use
@@ -53,6 +78,25 @@ pub fn init() {
 
         js_sys::Reflect::set(&wasm_obj, &JsValue::from_str("get_login_url"), get_login_url_fn.as_ref()).ok();
         get_login_url_fn.forget();
+
+        // Expose default credentials from compile-time env vars
+        let get_default_api_key_fn = Closure::wrap(Box::new(|| -> JsValue {
+            match get_default_api_key() {
+                Some(key) => JsValue::from_str(&key),
+                None => JsValue::NULL,
+            }
+        }) as Box<dyn Fn() -> JsValue>);
+        js_sys::Reflect::set(&wasm_obj, &JsValue::from_str("get_default_api_key"), get_default_api_key_fn.as_ref()).ok();
+        get_default_api_key_fn.forget();
+
+        let get_default_access_token_fn = Closure::wrap(Box::new(|| -> JsValue {
+            match get_default_access_token() {
+                Some(token) => JsValue::from_str(&token),
+                None => JsValue::NULL,
+            }
+        }) as Box<dyn Fn() -> JsValue>);
+        js_sys::Reflect::set(&wasm_obj, &JsValue::from_str("get_default_access_token"), get_default_access_token_fn.as_ref()).ok();
+        get_default_access_token_fn.forget();
 
         // Test API call (blocked by CORS, for reference)
         let test_api_fn = Closure::wrap(Box::new(|api_key: String, access_token: String, endpoint: String| {
